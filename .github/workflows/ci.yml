@@ -15,5 +15,7 @@ jobs:
     environment: default
     steps:
       - uses: actions/checkout@v4
+      - name: Select Xcode 16.3
+        run: sudo xcode-select -s /Applications/Xcode_16.3.app/Contents/Developer
       - name: Build package
         run: swift package resolve

@@ -18,13 +18,13 @@ let package = Package(
     targets: [
         .binaryTarget(
             name: "PSPDFKit",
-            url: "https://github.com/MFB-Technologies-Inc/PSPDFKit-SP-Mirror/releases/download/pre-26.2.0/Nutrient-iOS-SDK-PSPDFKit.xcframework-26.2.0.zip",
-            checksum: "efd9780acd7d14b342afcf99e77de567d73ced9d692703e821dcd535b547805e"
+            url: "https://github.com/MFB-Technologies-Inc/PSPDFKit-SP-Mirror/releases/download/pre-26.4.0/Nutrient-iOS-SDK-PSPDFKit.xcframework-26.4.0.zip",
+            checksum: "44524b98f997c74edba441fa9680f0d61dae81ad7fc57ba814bee575b35838e0"
         ),
         .binaryTarget(
             name: "PSPDFKitUI",
-            url: "https://github.com/MFB-Technologies-Inc/PSPDFKit-SP-Mirror/releases/download/pre-26.2.0/Nutrient-iOS-SDK-PSPDFKitUI.xcframework-26.2.0.zip",
-            checksum: "94de18dc94ca2cfca99b4ef98312c25ba0f7db8536c6d19931079402cd09aa4b"
+            url: "https://github.com/MFB-Technologies-Inc/PSPDFKit-SP-Mirror/releases/download/pre-26.4.0/Nutrient-iOS-SDK-PSPDFKitUI.xcframework-26.4.0.zip",
+            checksum: "d2b223cfb9abece3711e4a456d957a5cdc9215dce4b89e6817e379c04f31c00c"
         ),
     ]
 )

@@ -1,4 +1,4 @@
-// swift-tools-version: 6.1
+// swift-tools-version: 6.3
 
 import PackageDescription
 
@@ -18,13 +18,13 @@ let package = Package(
     targets: [
         .binaryTarget(
             name: "PSPDFKit",
-            url: "https://github.com/MFB-Technologies-Inc/PSPDFKit-SP-Mirror/releases/download/pre-26.9.0/Nutrient-iOS-SDK-PSPDFKit.xcframework-26.9.0.zip",
-            checksum: "1408e23468ecc9f865dc582e3e7506849d78f39aeaec47eb237175f266d5a5dd"
+            url: "https://github.com/MFB-Technologies-Inc/PSPDFKit-SP-Mirror/releases/download/pre-26.11.0/Nutrient-iOS-SDK-PSPDFKit.xcframework-26.11.0.zip",
+            checksum: "672218cfb02b615b89ccdc640aaa957743b8fcb0358e57b5bc136df0c6133f01"
         ),
         .binaryTarget(
             name: "PSPDFKitUI",
-            url: "https://github.com/MFB-Technologies-Inc/PSPDFKit-SP-Mirror/releases/download/pre-26.9.0/Nutrient-iOS-SDK-PSPDFKitUI.xcframework-26.9.0.zip",
-            checksum: "1ee18e35be3d438009b237f1b0f0ebce4a38d2d9fc1e2cbaee9bfca6cff8a2bf"
+            url: "https://github.com/MFB-Technologies-Inc/PSPDFKit-SP-Mirror/releases/download/pre-26.11.0/Nutrient-iOS-SDK-PSPDFKitUI.xcframework-26.11.0.zip",
+            checksum: "6c1ffa9d4e79cccf821bfefa2d166da2841e8231f4751876c614a925547e8b4f"
         ),
     ]
 )

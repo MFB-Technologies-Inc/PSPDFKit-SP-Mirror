@@ -1,0 +1,51 @@
+name: mirror-upstream
+
+# Detects new release tags on the upstream PSPDFKit-SP package and, for each one
+# newer than what we already mirror, opens a PR + `pre-<version>` prerelease that
+# re-hosts the framework binaries here. See .github/scripts/mirror-upstream.sh.
+
+on:
+  schedule:
+    # Daily at 08:00 UTC.
+    - cron: "0 8 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Specific upstream version to mirror (e.g. 26.11.0). Leave blank to auto-detect versions newer than the latest already mirrored."
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+# Never let two mirroring runs overlap (they push branches and cut releases).
+concurrency:
+  group: mirror-upstream
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          # A PAT (secret MIRROR_PAT) lets the pull request it opens trigger the
+          # `ci` workflow; the default GITHUB_TOKEN cannot trigger other
+          # workflows. Falls back to GITHUB_TOKEN, in which case CI must be
+          # kicked off manually on the PR.
+          token: ${{ secrets.MIRROR_PAT || github.token }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Mirror new upstream versions
+        env:
+          GH_TOKEN: ${{ secrets.MIRROR_PAT || github.token }}
+          UPSTREAM_REPO: PSPDFKit/PSPDFKit-SP
+          MIRROR_REPO: ${{ github.repository }}
+          FORCE_VERSION: ${{ inputs.version }}
+        run: bash .github/scripts/mirror-upstream.sh

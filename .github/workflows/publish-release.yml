@@ -1,0 +1,54 @@
+name: publish-release
+
+# When a mirror PR is merged into main, publish the final `<version>` release
+# and mark it as latest. The version is read from Package.swift, and the release
+# is only created if it doesn't already exist, so ordinary pushes to main (docs,
+# CI tweaks, etc.) are no-ops.
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Publish version release if missing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          # The current version is embedded in the pre-<version> release URLs in
+          # Package.swift, e.g. .../releases/download/pre-26.11.0/...
+          VERSION="$(grep -oE 'releases/download/pre-[0-9]+\.[0-9]+\.[0-9]+/' Package.swift \
+            | head -n1 \
+            | sed -E 's#releases/download/pre-([0-9]+\.[0-9]+\.[0-9]+)/#\1#')"
+
+          if [[ -z "$VERSION" ]]; then
+            echo "Could not determine a version from Package.swift; nothing to publish."
+            exit 0
+          fi
+          echo "Package.swift references version ${VERSION}"
+
+          if gh release view "$VERSION" >/dev/null 2>&1; then
+            echo "Release ${VERSION} already exists — nothing to do."
+            exit 0
+          fi
+
+          echo "Publishing release ${VERSION} (marked latest)"
+          gh release create "$VERSION" \
+            --target "$GITHUB_SHA" \
+            --title "$VERSION" \
+            --latest \
+            --generate-notes

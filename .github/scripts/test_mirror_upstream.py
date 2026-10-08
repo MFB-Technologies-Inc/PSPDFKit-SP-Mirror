@@ -453,6 +453,38 @@ class DryRunPlanTests(unittest.TestCase):
 
 
 class MainTests(unittest.TestCase):
+    def setUp(self):
+        # No PRs exist unless a test says otherwise.
+        patcher = mock.patch.object(mu, "find_pr", return_value=None)
+        self.find_pr = patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _open_prs(self, *versions):
+        self.find_pr.side_effect = lambda repo, branch: (
+            {"number": 1, "state": "OPEN"} if branch.removeprefix("feature/") in versions else None
+        )
+
+    @mock.patch.object(mu, "mirror_versions", return_value=["26.11.0"])
+    @mock.patch.object(mu, "upstream_versions", return_value=["26.12.0", "26.12.1", "27.0.0"])
+    @mock.patch.object(mu, "build_config", return_value=mu.Config("up", "mir"))
+    def test_skips_version_below_an_open_pr(self, cfg, ups, mirrors):
+        self._open_prs("26.12.0", "27.0.0")
+        with mock.patch.object(mu, "mirror_version", side_effect=lambda v, c, b: f"origin/feature/{v}") as mv, \
+             contextlib.redirect_stderr(io.StringIO()) as out:
+            self.assertEqual(mu.main([]), 0)
+        self.assertEqual([c.args[0] for c in mv.call_args_list], ["26.12.0", "27.0.0"])
+        self.assertIn("::warning::Skipping 26.12.1: 27.0.0 already has an open mirror PR", out.getvalue())
+
+    @mock.patch.object(mu, "mirror_version")
+    @mock.patch.object(mu, "mirror_versions", return_value=["26.11.0"])
+    @mock.patch.object(mu, "upstream_versions", return_value=["26.12.0", "26.12.1", "27.0.0"])
+    @mock.patch.object(mu, "build_config", return_value=mu.Config("up", "mir", force_version="26.12.1"))
+    def test_force_version_skips_below_an_open_pr(self, cfg, ups, mirrors, mv):
+        self._open_prs("27.0.0")
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(mu.main([]), 0)
+        mv.assert_not_called()
+
     @mock.patch.object(mu, "mirror_version")
     @mock.patch.object(mu, "mirror_versions", return_value=["26.9.0"])
     @mock.patch.object(mu, "upstream_versions", return_value=["26.10.0", "26.11.0"])

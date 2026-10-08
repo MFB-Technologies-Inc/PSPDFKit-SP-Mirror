@@ -610,6 +610,34 @@ def publish_releases(config: Config) -> int:
     return 0
 
 
+def skip_interleaved(candidates: Sequence[str], pool: Sequence[str], config: Config) -> List[str]:
+    """`candidates` minus those below a version in `pool` that has an open PR.
+
+    Upstream can ship an older line after a newer one is pending (26.12.1 while
+    27.0.0's PR is open). Stacking 26.12.1 on 26.12.0 makes it a sibling of
+    27.0.0, so the two PRs conflict in Package.swift, and merging both carelessly
+    leaves main older than latest. Skip it with a warning instead; it becomes a
+    hand backport.
+    """
+    prs = {v: find_pr(config.mirror_repo, f"feature/{v}") for v in pool}
+    open_versions = [v for v, pr in prs.items() if pr and pr["state"] == "OPEN"]
+    if not open_versions:
+        return list(candidates)
+    newest_open = max(open_versions, key=parse_version)
+    kept = []
+    for version in candidates:
+        if version_gt(newest_open, version) and not pr_is_done(prs.get(version), config, version):
+            print(
+                f"::warning::Skipping {version}: {newest_open} already has an open mirror "
+                f"PR, and {version} can't be stacked under it. Backport {version} by "
+                f"hand; see README.md.",
+                file=sys.stderr,
+            )
+        else:
+            kept.append(version)
+    return kept
+
+
 def dry_run_plan(versions: Sequence[str], config: Config) -> None:
     """Print, without side effects, what a real run would do: which versions are
     already done, what each remaining one reuses from an earlier run, and what
@@ -688,6 +716,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 1
         log(f"FORCE_VERSION set, mirroring only {config.force_version}")
         candidates = [config.force_version]
+        pool = compute_candidates(mirrors[-1], ups) if mirrors else candidates
     else:
         mirrors = mirror_versions(config)
         if not mirrors:
@@ -698,7 +727,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         mirror_max = mirrors[-1]  # filter_semver returns ascending order
         log(f"Newest version released here: {mirror_max}")
         candidates = compute_candidates(mirror_max, ups)
+        pool = candidates
 
+    candidates = skip_interleaved(candidates, pool, config)
     if not candidates:
         log("No new upstream versions to mirror. Nothing to do.")
         return 0

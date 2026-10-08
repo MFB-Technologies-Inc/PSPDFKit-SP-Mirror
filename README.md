@@ -18,6 +18,8 @@ Each step checks for its own output first, so if a run fails partway (say, a fra
 
 When more than one version is pending, each branch is stacked on the previous one so the pull requests don't conflict. The cost is that each PR's diff includes the earlier versions too. Merge them oldest first, using merge commits rather than squash, so the later branches stay based on what landed.
 
+If upstream ships an older version after a newer one already has an open PR (26.12.1 while 27.0.0 is pending), the workflow skips it with a warning instead of stacking it beside the newer PR, where the two would conflict. Backport it by hand.
+
 When you merge a pull request, the [`publish-release`](.github/workflows/publish-release.yml) workflow publishes a final `{{ version }}` release for every `pre-{{ version }}` whose `Package.swift` has reached `main`. The newest one is marked latest, and only if it's newer than the current latest release, so a merge out of order never moves latest backwards.
 
 To mirror a specific version on demand, run the `mirror-upstream` workflow via **Actions → mirror-upstream → Run workflow** and enter the version. This also mirrors a version again after its PR was closed. The version must be newer than the latest final release here, because an older one would rewind `main` to older binaries. Backport those by hand, as described below.
@@ -29,3 +31,5 @@ Pull requests opened by the default `GITHUB_TOKEN` do not trigger other workflow
 ### Doing it manually
 
 If you ever need to do this by hand: create a `feature/{{ version }}` branch, update the URLs and hashes for each framework, create a `pre-{{ version }}` release on that branch with the framework zips attached (not marked latest), and open a PR. Once the PR is merged, create a `{{ version }}` release marked as latest.
+
+A backport (a version older than the latest release) must not go through `main`, or `main` ends up on older binaries. Build its `feature/{{ version }}` branch from the newest release tag on that line instead of `main`, attach the zips to `pre-{{ version }}` as usual, and create the `{{ version }}` release from that branch, not marked latest. Skip the PR.

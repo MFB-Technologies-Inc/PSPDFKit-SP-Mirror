@@ -26,8 +26,9 @@ reached main, marking the newest one latest.
 Configuration comes from the environment:
   UPSTREAM_REPO   upstream owner/repo               (default: PSPDFKit/PSPDFKit-SP)
   MIRROR_REPO     this owner/repo                   (default: derived from `gh`)
-  FORCE_VERSION   mirror only this version, ignore  (optional)
-                  the "newer than mirror" check
+  FORCE_VERSION   mirror only this version, even if (optional)
+                  its PR was closed; must still be newer than the
+                  latest final release here
   DRY_RUN         if set to 1, print the plan and make no changes (optional)
   GH_TOKEN        token used by `gh` and `git push`
 
@@ -301,16 +302,22 @@ def branch_exists(branch: str) -> bool:
 
 
 def find_pr(repo: str, branch: str) -> Optional[dict]:
-    """The PR (any state) whose head is `branch`, as {number, state}, or None."""
+    """The newest PR (any state) whose head is `branch` in `repo` itself, as
+    {number, state, ...}, or None.
+
+    `gh pr list --head` matches the branch name only, so a fork's PR from a
+    same-named branch would match too. Anyone can open one on a public repo, so
+    drop them.
+    """
     out = capture([
         "gh", "pr", "list",
         "--repo", repo,
         "--head", branch,
         "--state", "all",
-        "--limit", "1",
-        "--json", "number,state",
+        "--limit", "100",
+        "--json", "number,state,isCrossRepository",
     ])
-    prs = json.loads(out or "[]")
+    prs = [pr for pr in json.loads(out or "[]") if not pr.get("isCrossRepository", True)]
     return prs[0] if prs else None
 
 
@@ -386,7 +393,11 @@ def mirror_version(version: str, config: Config, base: str = "origin/main") -> O
     log(f"[{version}] starting")
 
     pr = find_pr(config.mirror_repo, branch)
-    if pr:
+    if pr and pr["state"] == "CLOSED" and config.force_version == version:
+        # Asked for by name, so a closed PR isn't the final word. The daily run
+        # keeps skipping it, or a rejected version would be re-proposed daily.
+        log(f"[{version}] PR #{pr['number']} was closed; FORCE_VERSION set, mirroring again")
+    elif pr:
         log(f"[{version}] PR #{pr['number']} already exists ({pr['state'].lower()}), nothing to do")
         return f"origin/{branch}" if pr["state"] == "OPEN" else None
 
@@ -607,6 +618,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if config.force_version:
         if not SEMVER_RE.match(config.force_version) or config.force_version not in ups:
             log(f"FORCE_VERSION {config.force_version!r} is not an upstream version tag.")
+            return 1
+        # A version at or below the latest final release would open a PR that
+        # rewinds main to older binaries, so refuse it. With no final release
+        # yet, FORCE_VERSION is how the first one is seeded.
+        mirrors = mirror_versions(config)
+        if mirrors and not version_gt(config.force_version, mirrors[-1]):
+            log(f"FORCE_VERSION {config.force_version} is not newer than {mirrors[-1]}, the")
+            log("newest version released here. Mirroring it would downgrade main. Backport")
+            log("it by hand instead; see README.md.")
             return 1
         log(f"FORCE_VERSION set, mirroring only {config.force_version}")
         candidates = [config.force_version]

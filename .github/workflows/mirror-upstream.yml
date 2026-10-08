@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Specific upstream version to mirror (e.g. 26.11.0). Leave blank to auto-detect versions newer than the latest already mirrored."
+        description: "Specific upstream version to mirror (e.g. 26.11.0). Must be newer than the latest release here. Also re-mirrors a version whose PR was closed. Leave blank to auto-detect versions newer than the latest already mirrored."
         required: false
         type: string
 

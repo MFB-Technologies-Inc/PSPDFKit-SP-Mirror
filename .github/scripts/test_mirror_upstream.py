@@ -18,6 +18,7 @@ Usage:
 
 import contextlib
 import hashlib
+import json
 import os
 import subprocess
 import sys
@@ -210,6 +211,16 @@ class GitHubStateTests(unittest.TestCase):
             with self.assertRaises(mu.MirrorError):
                 mu.branch_exists("feature/1.0.0")
 
+    def test_find_pr_ignores_fork_prs(self):
+        prs = [
+            {"number": 41, "state": "CLOSED", "isCrossRepository": True},
+            {"number": 30, "state": "OPEN", "isCrossRepository": False},
+        ]
+        with mock.patch.object(mu, "capture", return_value=json.dumps(prs)):
+            self.assertEqual(mu.find_pr("mirror/repo", "feature/26.12.0")["number"], 30)
+        with mock.patch.object(mu, "capture", return_value=json.dumps(prs[:1])):
+            self.assertIsNone(mu.find_pr("mirror/repo", "feature/26.12.0"))
+
     def test_release_complete(self):
         both = [mu.kit_asset_name("1.0.0"), mu.ui_asset_name("1.0.0")]
         self.assertTrue(mu.release_complete({"id": 1, "draft": False, "assets": both}, "1.0.0"))
@@ -246,7 +257,8 @@ class MirrorVersionFlowTests(unittest.TestCase):
         self.addCleanup(self.work.cleanup)
 
     def _run(self, version="26.12.0", base="origin/main", pr=None, release=None,
-             branch=False, branch_manifest="", sha=_fake_sha):
+             branch=False, branch_manifest="", sha=_fake_sha, force_version=""):
+        self.config.force_version = force_version
         patches = {
             "find_pr": mock.patch.object(mu, "find_pr", return_value=pr),
             "find_release": mock.patch.object(mu, "find_release", return_value=release),
@@ -276,6 +288,15 @@ class MirrorVersionFlowTests(unittest.TestCase):
     def test_done_when_pr_merged_and_next_keeps_base(self):
         self.assertIsNone(self._run(pr={"number": 30, "state": "MERGED"}))
         self.assertEqual(self.commands, [])
+
+    def test_closed_pr_is_done_without_force_version(self):
+        self.assertIsNone(self._run(pr={"number": 30, "state": "CLOSED"}))
+        self.assertEqual(self.commands, [])
+
+    def test_force_version_mirrors_again_after_closed_pr(self):
+        result = self._run(pr={"number": 30, "state": "CLOSED"}, force_version="26.12.0")
+        self.assertEqual(result, "origin/feature/26.12.0")
+        self.assertTrue(self.commands[-1].startswith("gh pr create"))
 
     def test_fresh_version_runs_every_step_in_order(self):
         result = self._run()
@@ -342,9 +363,27 @@ class MirrorVersionFlowTests(unittest.TestCase):
 
 class MainTests(unittest.TestCase):
     @mock.patch.object(mu, "mirror_version")
+    @mock.patch.object(mu, "mirror_versions", return_value=["26.9.0"])
     @mock.patch.object(mu, "upstream_versions", return_value=["26.10.0", "26.11.0"])
+    @mock.patch.object(mu, "build_config", return_value=mu.Config("up", "mir", force_version="26.11.0"))
+    def test_force_version_mirrors_only_that(self, cfg, ups, mirrors, mv):
+        self.assertEqual(mu.main([]), 0)
+        mv.assert_called_once_with("26.11.0", cfg.return_value, "origin/main")
+
+    @mock.patch.object(mu, "mirror_version")
+    @mock.patch.object(mu, "mirror_versions", return_value=["26.10.0", "26.11.0"])
+    @mock.patch.object(mu, "upstream_versions", return_value=["26.10.0", "26.11.0"])
+    def test_force_version_refuses_downgrade(self, ups, mirrors, mv):
+        for old in ("26.10.0", "26.11.0"):
+            with mock.patch.object(mu, "build_config", return_value=mu.Config("up", "mir", force_version=old)):
+                self.assertEqual(mu.main([]), 1, old)
+        mv.assert_not_called()
+
+    @mock.patch.object(mu, "mirror_version")
+    @mock.patch.object(mu, "mirror_versions", return_value=[])
+    @mock.patch.object(mu, "upstream_versions", return_value=["26.10.0"])
     @mock.patch.object(mu, "build_config", return_value=mu.Config("up", "mir", force_version="26.10.0"))
-    def test_force_version_mirrors_only_that(self, cfg, ups, mv):
+    def test_force_version_seeds_first_release(self, cfg, ups, mirrors, mv):
         self.assertEqual(mu.main([]), 0)
         mv.assert_called_once_with("26.10.0", cfg.return_value, "origin/main")
 

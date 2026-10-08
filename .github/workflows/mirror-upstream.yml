@@ -2,7 +2,7 @@ name: mirror-upstream
 
 # Detects new release tags on the upstream PSPDFKit-SP package and, for each one
 # newer than what we already mirror, opens a PR + `pre-<version>` prerelease that
-# re-hosts the framework binaries here. See .github/scripts/mirror-upstream.sh.
+# re-hosts the framework binaries here. See .github/scripts/mirror_upstream.py.
 
 on:
   schedule:
@@ -48,4 +48,4 @@ jobs:
           UPSTREAM_REPO: PSPDFKit/PSPDFKit-SP
           MIRROR_REPO: ${{ github.repository }}
           FORCE_VERSION: ${{ inputs.version }}
-        run: bash .github/scripts/mirror-upstream.sh
+        run: python3 .github/scripts/mirror_upstream.py

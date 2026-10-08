@@ -22,6 +22,8 @@ If upstream ships an older version after a newer one already has an open PR (26.
 
 When you merge a pull request, the [`publish-release`](.github/workflows/publish-release.yml) workflow publishes a final `{{ version }}` release for every `pre-{{ version }}` whose `Package.swift` has reached `main`. The newest one is marked latest, and only if it's newer than the current latest release, so a merge out of order never moves latest backwards.
 
+Closing a PR in the middle of a stack doesn't keep that version out. The PRs stacked on it carry its commit, so merging any of them publishes it too (not as latest). To drop it, close the later PRs as well and mirror those versions by hand.
+
 To mirror a specific version on demand, run the `mirror-upstream` workflow via **Actions → mirror-upstream → Run workflow** and enter the version. This also mirrors a version again after its PR was closed. The version must be newer than the latest final release here, because an older one would rewind `main` to older binaries. Backport those by hand, as described below.
 
 ### Making the auto-opened PR run CI

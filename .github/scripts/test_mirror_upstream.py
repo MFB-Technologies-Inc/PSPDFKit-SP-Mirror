@@ -290,13 +290,18 @@ class MirrorVersionFlowTests(unittest.TestCase):
         self.addCleanup(self.work.cleanup)
 
     def _run(self, version="26.12.0", base="origin/main", pr=None, release=None,
-             branch=False, branch_manifest="", sha=_fake_sha, force_version=""):
+             branch=False, branch_manifest="", sha=_fake_sha, force_version="",
+             branch_log="Mirror PSPDFKit-SP 26.12.0"):
         self.config.force_version = force_version
+
+        def capture(args):
+            return branch_log if args[:2] == ["git", "log"] else branch_manifest
+
         patches = {
             "find_pr": mock.patch.object(mu, "find_pr", return_value=pr),
             "find_release": mock.patch.object(mu, "find_release", return_value=release),
             "branch_exists": mock.patch.object(mu, "branch_exists", return_value=branch),
-            "capture": mock.patch.object(mu, "capture", return_value=branch_manifest),
+            "capture": mock.patch.object(mu, "capture", side_effect=capture),
             "fetch_text": mock.patch.object(mu, "fetch_text", return_value=UPSTREAM_MANIFEST),
             "download_file": mock.patch.object(mu, "download_file"),
             "sha256_file": mock.patch.object(mu, "sha256_file", side_effect=sha),
@@ -385,13 +390,29 @@ class MirrorVersionFlowTests(unittest.TestCase):
         commands = [c.args[0] for c in self.mocks["run"].call_args_list]
         self.assertFalse(any(c[0] == "gh" for c in commands))
 
-    def test_stacks_on_given_base(self):
-        self._run(version="27.0.0", base="origin/feature/26.12.0")
-        self.assertIn("git fetch origin feature/26.12.0", self.commands)
-        self.assertIn("git checkout -B feature/27.0.0 origin/feature/26.12.0", self.commands)
+    def _pr_body(self):
         pr_args = self.mocks["run"].call_args_list[self._index("gh pr create")].args[0]
         self.assertEqual(pr_args[pr_args.index("--base") + 1], "main")
-        self.assertIn("stacked on `feature/26.12.0`", pr_args[pr_args.index("--body") + 1])
+        return pr_args[pr_args.index("--body") + 1]
+
+    def test_stacks_on_given_base(self):
+        self._run(version="27.0.0", base="origin/feature/26.12.0",
+                  branch_log="Mirror PSPDFKit-SP 27.0.0\nMirror PSPDFKit-SP 26.12.0")
+        self.assertIn("git fetch origin feature/26.12.0", self.commands)
+        self.assertIn("git checkout -B feature/27.0.0 origin/feature/26.12.0", self.commands)
+        self.assertIn("stacked on the unmerged mirror of `26.12.0`", self._pr_body())
+
+    def test_unstacked_pr_body_has_no_stack_note(self):
+        self._run()
+        self.assertNotIn("stacked", self._pr_body())
+
+    def test_stack_note_comes_from_the_branch_not_the_base(self):
+        # Built on feature/26.12.0 by an earlier run; that PR closed before this
+        # run created 27.0.0's, so `base` is back to main.
+        self._run(version="27.0.0", branch=True,
+                  branch_manifest="url: .../releases/download/pre-27.0.0/x.zip",
+                  branch_log="Mirror PSPDFKit-SP 27.0.0\nMirror PSPDFKit-SP 26.12.0")
+        self.assertIn("stacked on the unmerged mirror of `26.12.0`", self._pr_body())
 
 
 class MainTests(unittest.TestCase):

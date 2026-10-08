@@ -369,13 +369,28 @@ def _release_notes(config: Config, version: str) -> str:
     )
 
 
-def _pr_body(config: Config, version: str, pre_tag: str, base: str) -> str:
+MIRROR_COMMIT_RE = re.compile(r"^Mirror PSPDFKit-SP (\d+\.\d+\.\d+)$")
+
+
+def unmerged_versions(branch: str, version: str) -> List[str]:
+    """Other versions whose mirror commits `origin/<branch>` carries and main
+    lacks, ascending. Read from the branch itself, so it is right however the
+    branch was built, including by an earlier run on a different base."""
+    run(["git", "fetch", "origin", "main"])
+    log_out = capture(["git", "log", "--format=%s", f"origin/main..origin/{branch}"])
+    found = {m.group(1) for line in log_out.splitlines() if (m := MIRROR_COMMIT_RE.match(line.strip()))}
+    found.discard(version)
+    return sorted(found, key=parse_version)
+
+
+def _pr_body(config: Config, version: str, pre_tag: str, stacked_on: Sequence[str]) -> str:
     stacked = ""
-    if base != "origin/main":
+    if stacked_on:
+        versions = ", ".join(f"`{v}`" for v in stacked_on)
         stacked = (
-            f"\n\nThis branch is stacked on `{base.removeprefix('origin/')}`, so "
-            f"the diff includes the earlier version(s) too. Merge the earlier PR "
-            f"first."
+            f"\n\nThis branch is stacked on the unmerged mirror of {versions}, so "
+            f"the diff includes those versions too. Merge their PRs first, using "
+            f"merge commits."
         )
     return (
         f"Automated mirror of upstream `{config.upstream_repo}` **{version}**.\n\n"
@@ -486,7 +501,7 @@ def mirror_version(version: str, config: Config, base: str = "origin/main") -> O
             rewritten = sync_toolchain(rewritten, upstream_text)
             Path(MANIFEST_PATH).write_text(rewritten)
             run(["git", "add", MANIFEST_PATH])
-            run(["git", "commit", "-m", f"Mirror PSPDFKit-SP {version}"])
+            run(["git", "commit", "-m", f"Mirror PSPDFKit-SP {version}"])  # see MIRROR_COMMIT_RE
             run(["git", "push", "origin", branch])
 
         # 5. Prerelease with the framework zips attached. Marked as a prerelease
@@ -518,7 +533,7 @@ def mirror_version(version: str, config: Config, base: str = "origin/main") -> O
         "--base", "main",
         "--head", branch,
         "--title", f"Mirror PSPDFKit-SP {version}",
-        "--body", _pr_body(config, version, pre_tag, base),
+        "--body", _pr_body(config, version, pre_tag, unmerged_versions(branch, version)),
     ])
 
     log(f"[{version}] done")

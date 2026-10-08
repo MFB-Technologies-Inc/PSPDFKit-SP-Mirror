@@ -50,6 +50,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -221,10 +222,24 @@ def capture(args: Sequence[str]) -> str:
     ).stdout.strip()
 
 
-def fetch_bytes(url: str, headers: Optional[Dict[str, str]] = None) -> bytes:
+def fetch_bytes(url: str, headers: Optional[Dict[str, str]] = None, attempts: int = 3) -> bytes:
+    """GET `url`, retrying network errors, 429s and 5xx with backoff. Other HTTP
+    errors (a 404 for a missing tag) are real answers and raise immediately."""
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, **(headers or {})})
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        return resp.read()
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return resp.read()
+        except urllib.error.HTTPError as e:
+            if e.code != 429 and e.code < 500 or attempt == attempts:
+                raise
+            log(f"GET {url} failed with HTTP {e.code}, retrying ({attempt}/{attempts})")
+        except (urllib.error.URLError, TimeoutError) as e:
+            if attempt == attempts:
+                raise
+            log(f"GET {url} failed ({e}), retrying ({attempt}/{attempts})")
+        time.sleep(2 ** attempt)
+    raise AssertionError("unreachable")
 
 
 def fetch_text(url: str) -> str:

@@ -202,6 +202,39 @@ class SyncToolchainTests(unittest.TestCase):
             mu.sync_toolchain(ours, FIXTURE_MANIFEST)
 
 
+class FetchRetryTests(unittest.TestCase):
+    URL = "https://raw.githubusercontent.com/up/stream/26.12.0/Package.swift"
+
+    def _http_error(self, code):
+        return mu.urllib.error.HTTPError(self.URL, code, "err", {}, None)
+
+    def _fetch(self, side_effect):
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b"ok"
+        effects = [response if e == "ok" else e for e in side_effect]
+        with mock.patch.object(mu.urllib.request, "urlopen", side_effect=effects) as urlopen, \
+             mock.patch.object(mu.time, "sleep"):
+            try:
+                return mu.fetch_bytes(self.URL)
+            finally:
+                self.calls = urlopen.call_count
+
+    def test_retries_transient_errors(self):
+        result = self._fetch([mu.urllib.error.URLError("reset"), self._http_error(502), "ok"])
+        self.assertEqual(result, b"ok")
+        self.assertEqual(self.calls, 3)
+
+    def test_gives_up_after_three_attempts(self):
+        with self.assertRaises(mu.urllib.error.HTTPError):
+            self._fetch([self._http_error(503)] * 3)
+        self.assertEqual(self.calls, 3)
+
+    def test_does_not_retry_not_found(self):
+        with self.assertRaises(mu.urllib.error.HTTPError):
+            self._fetch([self._http_error(404)])
+        self.assertEqual(self.calls, 1)
+
+
 class GitHubStateTests(unittest.TestCase):
     def test_branch_exists_fails_closed(self):
         for code, expected in ((0, True), (2, False)):

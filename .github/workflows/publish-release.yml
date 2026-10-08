@@ -7,11 +7,16 @@ name: publish-release
 # is marked latest, and only if it is newer than the current latest release.
 # Ordinary pushes to main (docs, CI tweaks, etc.) find nothing to publish. See
 # `publish_releases` in .github/scripts/mirror_upstream.py.
+#
+# Run it by hand (Actions -> publish-release -> Run workflow) to retry after a
+# failed publish. It only runs from main, since it publishes whatever reached
+# the checked-out history.
 
 on:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -22,6 +27,7 @@ concurrency:
 
 jobs:
   publish:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

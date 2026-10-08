@@ -1,20 +1,27 @@
 #!/usr/bin/env python3
 """Mirror new releases of the upstream PSPDFKit-SP package into this repository.
 
-For every upstream version tag that is newer than the newest version already
-mirrored here, this script:
+For every upstream version tag that is newer than the newest version with a
+final release here, this script:
   1. reads the upstream Package.swift at that tag to learn the framework
      download URLs and their SHA-256 checksums,
   2. downloads the two framework zips (PSPDFKit + PSPDFKitUI),
   3. verifies the downloaded bytes against the upstream checksums,
   4. creates a `feature/<version>` branch with an updated Package.swift that
-     points at this repo's own release assets,
+     points at this repo's own release assets and copies upstream's
+     swift-tools-version and platforms,
   5. creates a `pre-<version>` prerelease (NOT marked latest) with the two
      zips attached, and
   6. opens a pull request against `main`.
 
-The final `<version>` release (marked latest) is published by the
-publish-release workflow once the pull request is merged.
+Each step checks for its own output first, so a run that failed partway is
+resumed by the next one; a version is done once its PR exists. When several
+versions are pending, each branch is stacked on the previous open one so the
+PRs don't conflict.
+
+`mirror_upstream.py publish` is run by the publish-release workflow on main. It
+publishes the final `<version>` release for each `pre-<version>` that has
+reached main, marking the newest one latest.
 
 Configuration comes from the environment:
   UPSTREAM_REPO   upstream owner/repo               (default: PSPDFKit/PSPDFKit-SP)
@@ -157,6 +164,24 @@ def rewrite_manifest(
     return text
 
 
+_TOOLS_VERSION_RE = re.compile(r"^// swift-tools-version:.*$", re.M)
+_PLATFORMS_RE = re.compile(r"platforms:\s*\[[^\]]*\]")
+
+
+def sync_toolchain(text: str, upstream: str) -> str:
+    """Return `text` with its swift-tools-version line and `platforms:` block
+    copied from `upstream`, so consumers get the same toolchain and OS minimums
+    upstream declares. Fails unless each appears exactly once in both."""
+    for pattern, label in ((_TOOLS_VERSION_RE, "swift-tools-version"), (_PLATFORMS_RE, "platforms")):
+        source = pattern.findall(upstream)
+        if len(source) != 1:
+            raise MirrorError(f"expected exactly 1 {label} in upstream Package.swift, found {len(source)}")
+        text, n = pattern.subn(lambda _m: source[0], text)
+        if n != 1:
+            raise MirrorError(f"expected exactly 1 {label} in Package.swift, found {n}")
+    return text
+
+
 def kit_asset_name(version: str) -> str:
     return f"Nutrient-iOS-SDK-PSPDFKit.xcframework-{version}.zip"
 
@@ -188,13 +213,6 @@ def run(args: Sequence[str]) -> subprocess.CompletedProcess:
     return subprocess.run(list(args), check=True, text=True)
 
 
-def run_ok(args: Sequence[str]) -> bool:
-    """Run a command purely for its exit status, suppressing all output."""
-    return subprocess.run(
-        list(args), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-    ).returncode == 0
-
-
 def capture(args: Sequence[str]) -> str:
     """Run a command and return its stdout, stripped; raise on failure."""
     return subprocess.run(
@@ -219,7 +237,7 @@ def fetch_json(url: str):
 def download_file(url: str, dest) -> None:
     """Download a (possibly large, ~100 MB) file to `dest`. Uses curl for its
     robust redirect/retry handling on big binary transfers."""
-    run(["curl", "-fSL", url, "-o", str(dest)])
+    run(["curl", "-fSL", "--retry", "3", "--retry-all-errors", url, "-o", str(dest)])
 
 
 # ---------------------------------------------------------------------------
@@ -259,17 +277,62 @@ def upstream_versions(config: Config) -> List[str]:
 
 
 def mirror_versions(config: Config) -> List[str]:
-    """Mirror versions come from tags like `26.11.0` or `pre-26.11.0`."""
-    stripped = [re.sub(r"^pre-", "", tag) for tag in list_repo_tags(config.mirror_repo)]
-    return filter_semver(stripped)
+    """Versions with a final release here (tags like `26.11.0`).
 
-
-def ref_exists(repo: str, tag: str) -> bool:
-    return run_ok(["gh", "api", f"repos/{repo}/git/ref/tags/{tag}"])
+    `pre-` tags deliberately don't count: a version is only finished once its
+    PR merges and the final release is published. Until then it stays a
+    candidate, so a later run can resume it if an earlier one failed partway.
+    """
+    return filter_semver(list_repo_tags(config.mirror_repo))
 
 
 def branch_exists(branch: str) -> bool:
-    return run_ok(["git", "ls-remote", "--exit-code", "--heads", "origin", branch])
+    """True iff `branch` exists on origin. Raises on any git failure other than
+    "no such branch", so a network or auth error is never read as "absent"."""
+    proc = subprocess.run(
+        ["git", "ls-remote", "--exit-code", "--heads", "origin", branch],
+        stdout=subprocess.DEVNULL,
+    )
+    if proc.returncode == 0:
+        return True
+    if proc.returncode == 2:  # --exit-code: no matching refs
+        return False
+    raise MirrorError(f"git ls-remote failed for {branch} (exit {proc.returncode})")
+
+
+def find_pr(repo: str, branch: str) -> Optional[dict]:
+    """The PR (any state) whose head is `branch`, as {number, state}, or None."""
+    out = capture([
+        "gh", "pr", "list",
+        "--repo", repo,
+        "--head", branch,
+        "--state", "all",
+        "--limit", "1",
+        "--json", "number,state",
+    ])
+    prs = json.loads(out or "[]")
+    return prs[0] if prs else None
+
+
+def find_release(repo: str, tag: str) -> Optional[dict]:
+    """The release (including drafts) for `tag`, as {id, draft, assets}, where
+    `assets` lists the names of fully uploaded assets. None if there is none."""
+    out = capture([
+        "gh", "api", "--paginate", f"repos/{repo}/releases",
+        "--jq",
+        f'.[] | select(.tag_name == "{tag}") | {{id, draft, '
+        f'assets: [.assets[] | select(.state == "uploaded") | .name]}}',
+    ])
+    lines = [line for line in out.splitlines() if line.strip()]
+    return json.loads(lines[0]) if lines else None
+
+
+def release_complete(release: Optional[dict], version: str) -> bool:
+    """True iff `release` is published with both framework zips attached."""
+    if not release or release["draft"]:
+        return False
+    assets = set(release["assets"])
+    return kit_asset_name(version) in assets and ui_asset_name(version) in assets
 
 
 # ---------------------------------------------------------------------------
@@ -284,117 +347,219 @@ def _release_notes(config: Config, version: str) -> str:
     )
 
 
-def _pr_body(config: Config, version: str, pre_tag: str) -> str:
+def _pr_body(config: Config, version: str, pre_tag: str, base: str) -> str:
+    stacked = ""
+    if base != "origin/main":
+        stacked = (
+            f"\n\nThis branch is stacked on `{base.removeprefix('origin/')}`, so "
+            f"the diff includes the earlier version(s) too. Merge the earlier PR "
+            f"first."
+        )
     return (
         f"Automated mirror of upstream `{config.upstream_repo}` **{version}**.\n\n"
         f"- `Package.swift` now points at the "
         f"[`{pre_tag}`](https://github.com/{config.mirror_repo}/releases/tag/{pre_tag}) "
         f"release assets.\n"
+        f"- `swift-tools-version` and `platforms` copied from upstream's "
+        f"`Package.swift`.\n"
         f"- Prerelease `{pre_tag}` created with the framework zips attached "
         f"(not marked latest).\n"
         f"- Downloaded bytes verified against the checksums declared in upstream's "
         f"`Package.swift`.\n\n"
-        f"When this PR is merged, the `{version}` release will be published and "
-        f"marked latest automatically."
+        f"When this PR is merged, the `{version}` release will be published "
+        f"automatically, and marked latest if it is the newest version."
+        f"{stacked}"
     )
 
 
-def mirror_version(version: str, config: Config) -> None:
+def mirror_version(version: str, config: Config, base: str = "origin/main") -> Optional[str]:
+    """Mirror one version, resuming from whatever an earlier failed run left.
+
+    Each step checks for its own output before acting, so the version is only
+    "done" once its PR exists. Returns the remote branch the next version should
+    stack on (`origin/feature/<version>`), or None if this version's PR is
+    already merged or closed and the next version should keep `base`.
+    """
     pre_tag = f"pre-{version}"
     branch = f"feature/{version}"
 
     log(f"[{version}] starting")
 
-    # Idempotency: skip anything already in progress or done.
-    if ref_exists(config.mirror_repo, pre_tag):
-        log(f"[{version}] tag {pre_tag} already exists — skipping")
-        return
-    if branch_exists(branch):
-        log(f"[{version}] branch {branch} already exists — skipping")
-        return
+    pr = find_pr(config.mirror_repo, branch)
+    if pr:
+        log(f"[{version}] PR #{pr['number']} already exists ({pr['state'].lower()}), nothing to do")
+        return f"origin/{branch}" if pr["state"] == "OPEN" else None
+
+    # 1. Read upstream Package.swift for this tag.
+    log(f"[{version}] reading upstream Package.swift")
+    upstream_text = fetch_text(
+        f"https://raw.githubusercontent.com/{config.upstream_repo}/{version}/Package.swift"
+    )
+    targets = manifest_targets_by_name(upstream_text)
+    kit = targets.get("PSPDFKit")
+    ui = targets.get("PSPDFKitUI")
+    if not (kit and ui and kit.url and ui.url and kit.checksum and ui.checksum):
+        raise MirrorError(
+            f"[{version}] failed to parse PSPDFKit/PSPDFKitUI targets from "
+            f"upstream Package.swift"
+        )
+
+    kit_asset = kit_asset_name(version)
+    ui_asset = ui_asset_name(version)
+    release = find_release(config.mirror_repo, pre_tag)
+    need_release = not release_complete(release, version)
 
     with tempfile.TemporaryDirectory() as tmp_name:
         tmp = Path(tmp_name)
-
-        # 1. Read upstream Package.swift for this tag.
-        log(f"[{version}] reading upstream Package.swift")
-        manifest_text = fetch_text(
-            f"https://raw.githubusercontent.com/{config.upstream_repo}/{version}/Package.swift"
-        )
-        targets = manifest_targets_by_name(manifest_text)
-        kit = targets.get("PSPDFKit")
-        ui = targets.get("PSPDFKitUI")
-        if not (kit and ui and kit.url and ui.url and kit.checksum and ui.checksum):
-            raise MirrorError(
-                f"[{version}] failed to parse PSPDFKit/PSPDFKitUI targets from "
-                f"upstream Package.swift"
-            )
-
-        # 2. Download the frameworks under this repo's asset naming convention.
-        kit_asset = kit_asset_name(version)
-        ui_asset = ui_asset_name(version)
         kit_path = tmp / kit_asset
         ui_path = tmp / ui_asset
-        log(f"[{version}] downloading frameworks")
-        download_file(kit.url, kit_path)
-        download_file(ui.url, ui_path)
 
-        # 3. Verify. The SPM binaryTarget checksum is the SHA-256 of the archive,
-        #    so re-hosting the identical bytes preserves it. A mismatch means the
-        #    file changed in transit (or upstream lied) — abort.
-        if not verify_checksum(kit_path, kit.checksum):
-            raise MirrorError(
-                f"[{version}] PSPDFKit checksum mismatch against upstream {kit.checksum}"
-            )
-        if not verify_checksum(ui_path, ui.checksum):
-            raise MirrorError(
-                f"[{version}] PSPDFKitUI checksum mismatch against upstream {ui.checksum}"
-            )
-        log(f"[{version}] checksums verified")
+        if need_release:
+            # 2. Download the frameworks under this repo's asset naming convention.
+            log(f"[{version}] downloading frameworks")
+            download_file(kit.url, kit_path)
+            download_file(ui.url, ui_path)
 
-        # 4. Create the feature branch with an updated Package.swift.
-        log(f"[{version}] creating branch {branch}")
-        run(["git", "checkout", "-B", branch, "origin/main"])
-        rewritten = rewrite_manifest(
-            Path(MANIFEST_PATH).read_text(),
-            config.mirror_repo,
-            pre_tag,
-            kit_asset,
-            kit.checksum,
-            ui_asset,
-            ui.checksum,
-        )
-        Path(MANIFEST_PATH).write_text(rewritten)
-        run(["git", "add", MANIFEST_PATH])
-        run(["git", "commit", "-m", f"Mirror PSPDFKit-SP {version}"])
-        run(["git", "push", "origin", branch])
+            # 3. Verify before touching git or GitHub. The SPM binaryTarget
+            #    checksum is the SHA-256 of the archive, so re-hosting the
+            #    identical bytes preserves it. A mismatch means the file changed
+            #    in transit (or upstream lied), so abort.
+            if not verify_checksum(kit_path, kit.checksum):
+                raise MirrorError(
+                    f"[{version}] PSPDFKit checksum mismatch against upstream {kit.checksum}"
+                )
+            if not verify_checksum(ui_path, ui.checksum):
+                raise MirrorError(
+                    f"[{version}] PSPDFKitUI checksum mismatch against upstream {ui.checksum}"
+                )
+            log(f"[{version}] checksums verified")
+
+        # 4. The feature branch with an updated Package.swift, stacked on `base`.
+        if branch_exists(branch):
+            run(["git", "fetch", "origin", branch])
+            existing = capture(["git", "show", f"origin/{branch}:{MANIFEST_PATH}"])
+            if f"/releases/download/{pre_tag}/" not in existing:
+                raise MirrorError(
+                    f"[{version}] branch {branch} exists but its Package.swift does not "
+                    f"point at {pre_tag}; fix or delete the branch and re-run"
+                )
+            log(f"[{version}] reusing existing branch {branch}")
+        else:
+            log(f"[{version}] creating branch {branch} from {base}")
+            run(["git", "fetch", "origin", base.removeprefix("origin/")])
+            run(["git", "checkout", "-B", branch, base])
+            rewritten = rewrite_manifest(
+                Path(MANIFEST_PATH).read_text(),
+                config.mirror_repo,
+                pre_tag,
+                kit_asset,
+                kit.checksum,
+                ui_asset,
+                ui.checksum,
+            )
+            rewritten = sync_toolchain(rewritten, upstream_text)
+            Path(MANIFEST_PATH).write_text(rewritten)
+            run(["git", "add", MANIFEST_PATH])
+            run(["git", "commit", "-m", f"Mirror PSPDFKit-SP {version}"])
+            run(["git", "push", "origin", branch])
 
         # 5. Prerelease with the framework zips attached. Marked as a prerelease
         #    so it is never resolved as "latest"; the `pre-` tag prefix keeps SPM
-        #    from resolving it as a package version.
-        log(f"[{version}] creating prerelease {pre_tag}")
-        run([
-            "gh", "release", "create", pre_tag,
-            str(kit_path), str(ui_path),
-            "--repo", config.mirror_repo,
-            "--target", branch,
-            "--title", pre_tag,
-            "--prerelease",
-            "--notes", _release_notes(config, version),
-        ])
+        #    from resolving it as a package version. A draft or a release missing
+        #    an asset is left over from a failed upload, so replace it.
+        if need_release:
+            if release:
+                log(f"[{version}] deleting incomplete release {pre_tag} (id {release['id']})")
+                run(["gh", "api", "-X", "DELETE", f"repos/{config.mirror_repo}/releases/{release['id']}"])
+            log(f"[{version}] creating prerelease {pre_tag}")
+            run([
+                "gh", "release", "create", pre_tag,
+                str(kit_path), str(ui_path),
+                "--repo", config.mirror_repo,
+                "--target", branch,
+                "--title", pre_tag,
+                "--prerelease",
+                "--notes", _release_notes(config, version),
+            ])
+        else:
+            log(f"[{version}] reusing existing prerelease {pre_tag}")
 
-        # 6. Open the pull request.
-        log(f"[{version}] opening pull request")
-        run([
-            "gh", "pr", "create",
-            "--repo", config.mirror_repo,
-            "--base", "main",
-            "--head", branch,
-            "--title", f"Mirror PSPDFKit-SP {version}",
-            "--body", _pr_body(config, version, pre_tag),
-        ])
+    # 6. Open the pull request last: its existence marks the version as done.
+    log(f"[{version}] opening pull request")
+    run([
+        "gh", "pr", "create",
+        "--repo", config.mirror_repo,
+        "--base", "main",
+        "--head", branch,
+        "--title", f"Mirror PSPDFKit-SP {version}",
+        "--body", _pr_body(config, version, pre_tag, base),
+    ])
 
-        log(f"[{version}] done")
+    log(f"[{version}] done")
+    return f"origin/{branch}"
+
+
+# ---------------------------------------------------------------------------
+# Publishing final releases (run by the publish-release workflow on main)
+# ---------------------------------------------------------------------------
+
+def manifest_commit(version: str) -> Optional[str]:
+    """The newest commit reachable from HEAD whose Package.swift points at
+    `pre-<version>`, or None if the version never reached this history."""
+    needle = f"/releases/download/pre-{version}/"
+    shas = ["HEAD"] + capture(["git", "log", "--full-history", "--format=%H", "HEAD", "--", MANIFEST_PATH]).split()
+    for sha in shas:
+        if needle in capture(["git", "show", f"{sha}:{MANIFEST_PATH}"]):
+            return capture(["git", "rev-parse", sha])
+    return None
+
+
+def latest_release(repo: str) -> str:
+    return capture(["gh", "release", "view", "--repo", repo, "--json", "tagName", "--jq", ".tagName"])
+
+
+def publish_releases(config: Config) -> int:
+    """Publish a final `<version>` release for every `pre-<version>` tag that
+    has none yet and whose manifest has reached HEAD (main).
+
+    Scanning every pre- tag, rather than only the version HEAD points at, covers
+    stacked PRs merged out of order and publish runs that GitHub cancelled. Only
+    the newest version is marked latest, and only when it is newer than the
+    current latest release, so a backport never moves "latest" backwards.
+    """
+    tags = list_repo_tags(config.mirror_repo)
+    finals = set(filter_semver(tags))
+    pre = filter_semver(t[len("pre-"):] for t in tags if t.startswith("pre-"))
+    pending = {}
+    for version in pre:
+        if version in finals:
+            continue
+        sha = manifest_commit(version)
+        if sha:
+            pending[version] = sha
+        else:
+            log(f"pre-{version} has not reached main yet, skipping")
+
+    if not pending:
+        log("No releases to publish.")
+        return 0
+
+    current = latest_release(config.mirror_repo)
+    newest = max(pending, key=parse_version)
+    for version in sorted(pending, key=parse_version):
+        latest = version == newest and (
+            not SEMVER_RE.match(current) or version_gt(version, current)
+        )
+        log(f"Publishing release {version} at {pending[version]} (latest: {latest})")
+        run([
+            "gh", "release", "create", version,
+            "--repo", config.mirror_repo,
+            "--target", pending[version],
+            "--title", version,
+            f"--latest={'true' if latest else 'false'}",
+            "--generate-notes",
+        ])
+    return 0
 
 
 def dry_run_plan(versions: Sequence[str], config: Config) -> None:
@@ -424,19 +589,26 @@ def build_config() -> Config:
     return Config(
         upstream_repo=upstream,
         mirror_repo=mirror,
-        force_version=os.environ.get("FORCE_VERSION") or "",
+        force_version=(os.environ.get("FORCE_VERSION") or "").strip(),
         dry_run=os.environ.get("DRY_RUN") == "1",
     )
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    argv = list(argv or [])
     config = build_config()
+
+    if argv[:1] == ["publish"]:
+        return publish_releases(config)
 
     ups = upstream_versions(config)
     log(f"Upstream {config.upstream_repo} has {len(ups)} version tags")
 
     if config.force_version:
-        log(f"FORCE_VERSION set — mirroring only {config.force_version}")
+        if not SEMVER_RE.match(config.force_version) or config.force_version not in ups:
+            log(f"FORCE_VERSION {config.force_version!r} is not an upstream version tag.")
+            return 1
+        log(f"FORCE_VERSION set, mirroring only {config.force_version}")
         candidates = [config.force_version]
     else:
         mirrors = mirror_versions(config)
@@ -446,7 +618,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             log("input to seed the first release.")
             return 1
         mirror_max = mirrors[-1]  # filter_semver returns ascending order
-        log(f"Newest version already mirrored: {mirror_max}")
+        log(f"Newest version released here: {mirror_max}")
         candidates = compute_candidates(mirror_max, ups)
 
     if not candidates:
@@ -455,13 +627,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     log(f"Versions to mirror: {' '.join(candidates)}")
 
     if config.dry_run:
-        log("DRY_RUN=1 — no branches, releases, or pull requests will be created.")
+        log("DRY_RUN=1, so no branches, releases, or pull requests will be created.")
         dry_run_plan(candidates, config)
         return 0
 
-    # Process oldest-to-newest so releases land in order.
+    # Process oldest-to-newest, stacking each branch on the previous open one so
+    # the PRs don't conflict with each other.
+    base = "origin/main"
     for version in candidates:
-        mirror_version(version, config)
+        base = mirror_version(version, config, base) or base
 
     log("All done.")
     return 0

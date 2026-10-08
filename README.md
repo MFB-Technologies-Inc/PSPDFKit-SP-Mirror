@@ -30,6 +30,8 @@ To mirror a specific version on demand, run the `mirror-upstream` workflow via *
 
 Pull requests opened by the default `GITHUB_TOKEN` do not trigger other workflows, so the [`ci`](.github/workflows/ci.yml) checks won't start automatically on the mirror PR. To get CI running on it, add a repository secret named `MIRROR_PAT` containing a personal access token with `contents` and `pull_requests` write access; the workflow will use it instead. Without the secret, close-and-reopen the PR (or push an empty commit) to kick off CI.
 
+Without `MIRROR_PAT`, `gh pr create` runs as `GITHUB_TOKEN` and fails unless Settings → Actions → General → "Allow GitHub Actions to create and approve pull requests" stays enabled. With `MIRROR_PAT`, the token's owner is the PR author and can't approve their own PRs, so if reviews are ever required, someone else has to approve.
+
 ### Doing it manually
 
 If you ever need to do this by hand: create a `feature/{{ version }}` branch, update the URLs and hashes for each framework, create a `pre-{{ version }}` release on that branch with the framework zips attached (not marked latest), and open a PR. Once the PR is merged, create a `{{ version }}` release marked as latest.

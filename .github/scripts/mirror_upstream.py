@@ -409,6 +409,15 @@ def _pr_body(config: Config, version: str, pre_tag: str, stacked_on: Sequence[st
     )
 
 
+def pr_is_done(pr: Optional[dict], config: Config, version: str) -> bool:
+    """Whether `pr` (from find_pr) means `version` needs no more work. A closed PR
+    does, except for the version named in FORCE_VERSION: the daily run keeps
+    skipping it, or a rejected version would be re-proposed every day."""
+    if not pr:
+        return False
+    return not (pr["state"] == "CLOSED" and config.force_version == version)
+
+
 def mirror_version(version: str, config: Config, base: str = "origin/main") -> Optional[str]:
     """Mirror one version, resuming from whatever an earlier failed run left.
 
@@ -423,13 +432,11 @@ def mirror_version(version: str, config: Config, base: str = "origin/main") -> O
     log(f"[{version}] starting")
 
     pr = find_pr(config.mirror_repo, branch)
-    if pr and pr["state"] == "CLOSED" and config.force_version == version:
-        # Asked for by name, so a closed PR isn't the final word. The daily run
-        # keeps skipping it, or a rejected version would be re-proposed daily.
-        log(f"[{version}] PR #{pr['number']} was closed; FORCE_VERSION set, mirroring again")
-    elif pr:
+    if pr_is_done(pr, config, version):
         log(f"[{version}] PR #{pr['number']} already exists ({pr['state'].lower()}), nothing to do")
         return f"origin/{branch}" if pr["state"] == "OPEN" else None
+    if pr:
+        log(f"[{version}] PR #{pr['number']} was closed; FORCE_VERSION set, mirroring again")
 
     # 1. Read upstream Package.swift for this tag.
     log(f"[{version}] reading upstream Package.swift")
@@ -604,8 +611,18 @@ def publish_releases(config: Config) -> int:
 
 
 def dry_run_plan(versions: Sequence[str], config: Config) -> None:
-    """Print, without side effects, what would be mirrored."""
+    """Print, without side effects, what a real run would do: which versions are
+    already done, what each remaining one reuses from an earlier run, and what
+    its branch would be stacked on. Mirrors the decisions in mirror_version."""
+    base = "origin/main"
     for version in versions:
+        branch = f"feature/{version}"
+        pr = find_pr(config.mirror_repo, branch)
+        if pr_is_done(pr, config, version):
+            print(f"[dry-run] {version}: PR #{pr['number']} {pr['state'].lower()}, nothing to do")
+            if pr["state"] == "OPEN":
+                base = f"origin/{branch}"
+            continue
         try:
             manifest_text = fetch_text(
                 f"https://raw.githubusercontent.com/{config.upstream_repo}/{version}/Package.swift"
@@ -613,13 +630,24 @@ def dry_run_plan(versions: Sequence[str], config: Config) -> None:
         except (urllib.error.URLError, OSError) as exc:
             log(f"[dry-run] {version}: could not fetch upstream Package.swift ({exc})")
             continue
+        release = find_release(config.mirror_repo, f"pre-{version}")
+        if release_complete(release, version):
+            tag_state = "exists, reused"
+        elif release:
+            tag_state = "incomplete, replaced"
+        else:
+            tag_state = "new"
+        branch_state = "exists, reused" if branch_exists(branch) else f"new, from {base}"
         print(f"[dry-run] {version}:")
-        print(f"    branch : feature/{version}")
-        print(f"    tag    : pre-{version} (prerelease, not latest)")
+        if pr:
+            print(f"    PR     : #{pr['number']} closed, opening a new one (FORCE_VERSION)")
+        print(f"    branch : {branch} ({branch_state})")
+        print(f"    tag    : pre-{version} (prerelease, not latest; {tag_state})")
         print(f"    assets : {kit_asset_name(version)}, {ui_asset_name(version)}")
         for target in parse_manifest(manifest_text):
             print(f"    source {target.name}: {target.url}")
             print(f"           checksum: {target.checksum}")
+        base = f"origin/{branch}"
 
 
 def build_config() -> Config:

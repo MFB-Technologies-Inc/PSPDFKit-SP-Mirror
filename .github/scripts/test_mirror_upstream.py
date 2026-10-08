@@ -18,6 +18,7 @@ Usage:
 
 import contextlib
 import hashlib
+import io
 import json
 import os
 import subprocess
@@ -413,6 +414,42 @@ class MirrorVersionFlowTests(unittest.TestCase):
                   branch_manifest="url: .../releases/download/pre-27.0.0/x.zip",
                   branch_log="Mirror PSPDFKit-SP 27.0.0\nMirror PSPDFKit-SP 26.12.0")
         self.assertIn("stacked on the unmerged mirror of `26.12.0`", self._pr_body())
+
+
+class DryRunPlanTests(unittest.TestCase):
+    def _plan(self, versions, prs=None, releases=None, branches=(), force_version=""):
+        prs, releases = prs or {}, releases or {}
+        config = mu.Config("up/stream", "mirror/repo", force_version=force_version, dry_run=True)
+        out = io.StringIO()
+        with mock.patch.object(mu, "find_pr", side_effect=lambda repo, b: prs.get(b)), \
+             mock.patch.object(mu, "find_release", side_effect=lambda repo, t: releases.get(t)), \
+             mock.patch.object(mu, "branch_exists", side_effect=lambda b: b in branches), \
+             mock.patch.object(mu, "fetch_text", return_value=UPSTREAM_MANIFEST), \
+             mock.patch.object(mu, "run") as run, \
+             contextlib.redirect_stdout(out):
+            mu.dry_run_plan(versions, config)
+        run.assert_not_called()
+        return out.getvalue()
+
+    def test_shows_done_versions_and_stack_base(self):
+        out = self._plan(
+            ["26.12.0", "27.0.0", "27.0.1"],
+            prs={"feature/26.12.0": {"number": 30, "state": "OPEN"}},
+            releases={"pre-27.0.0": dict(COMPLETE_RELEASE, draft=True)},
+            branches={"feature/27.0.0"},
+        )
+        self.assertIn("26.12.0: PR #30 open, nothing to do", out)
+        self.assertIn("branch : feature/27.0.0 (exists, reused)", out)
+        self.assertIn("pre-27.0.0 (prerelease, not latest; incomplete, replaced)", out)
+        self.assertIn("branch : feature/27.0.1 (new, from origin/feature/27.0.0)", out)
+        self.assertIn("pre-27.0.1 (prerelease, not latest; new)", out)
+
+    def test_closed_pr_only_reopened_by_force_version(self):
+        prs = {"feature/26.12.0": {"number": 30, "state": "CLOSED"}}
+        self.assertIn("PR #30 closed, nothing to do", self._plan(["26.12.0"], prs=prs))
+        forced = self._plan(["26.12.0"], prs=prs, force_version="26.12.0")
+        self.assertIn("#30 closed, opening a new one", forced)
+        self.assertIn("(new, from origin/main)", forced)
 
 
 class MainTests(unittest.TestCase):

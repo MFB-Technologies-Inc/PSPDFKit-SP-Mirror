@@ -4,6 +4,36 @@ This is a version of https://github.com/PSPDFKit/PSPDFKit-SP backed by CDN inste
 
 ## Updating for new releases
 
-Create a new branch named `feature/{{ new version }}`. Update the URLs and hashes for each framework. Create a release on this branch where the tag is `pre-{{ new version }}` with the framework zip files attached. The `pre-` part of the tag name is important because it prevents SPM from resolving that tag as the next version. This release should NOT be marked as latest.
+This is automated. The [`mirror-upstream`](.github/workflows/mirror-upstream.yml) workflow runs daily (and can be triggered manually) and, for every upstream [`PSPDFKit-SP`](https://github.com/PSPDFKit/PSPDFKit-SP) version tag newer than the latest final release here, it:
 
-Once the PR is merged, create a new release where the tag is the appropriate version number and should be marked as latest.
+1. reads the upstream `Package.swift` for the framework download URLs and checksums,
+2. downloads the two framework zips and verifies them against the upstream checksums,
+3. opens a `feature/{{ version }}` branch with an updated `Package.swift`, copying upstream's `swift-tools-version` and `platforms`,
+4. creates a `pre-{{ version }}` prerelease (not marked latest) with the zips attached, and
+5. opens a pull request.
+
+The `pre-` tag prefix keeps SPM from resolving that tag as a package version, and the prerelease flag keeps it from ever being treated as latest.
+
+Each step checks for its own output first, so if a run fails partway (say, a framework upload times out), the next daily run picks up where it stopped. A version counts as done once its pull request exists.
+
+When more than one version is pending, each branch is stacked on the previous one so the pull requests don't conflict. The cost is that each PR's diff includes the earlier versions too. Merge them oldest first, using merge commits rather than squash, so the later branches stay based on what landed.
+
+If upstream ships an older version after a newer one already has an open PR (26.12.1 while 27.0.0 is pending), the workflow skips it with a warning instead of stacking it beside the newer PR, where the two would conflict. Backport it by hand.
+
+When you merge a pull request, the [`publish-release`](.github/workflows/publish-release.yml) workflow publishes a final `{{ version }}` release for every `pre-{{ version }}` whose `Package.swift` has reached `main`. The newest one is marked latest, and only if it's newer than the current latest release, so a merge out of order never moves latest backwards.
+
+Closing a PR in the middle of a stack doesn't keep that version out. The PRs stacked on it carry its commit, so merging any of them publishes it too (not as latest). To drop it, close the later PRs as well and mirror those versions by hand.
+
+To mirror a specific version on demand, run the `mirror-upstream` workflow via **Actions → mirror-upstream → Run workflow** and enter the version. This also mirrors a version again after its PR was closed. The version must be newer than the latest final release here, because an older one would rewind `main` to older binaries. Backport those by hand, as described below.
+
+### Making the auto-opened PR run CI
+
+Pull requests opened by the default `GITHUB_TOKEN` do not trigger other workflows, so the [`ci`](.github/workflows/ci.yml) checks won't start automatically on the mirror PR. To get CI running on it, add a repository secret named `MIRROR_PAT` containing a personal access token with `contents` and `pull_requests` write access; the workflow will use it instead. Without the secret, close-and-reopen the PR (or push an empty commit) to kick off CI.
+
+Without `MIRROR_PAT`, `gh pr create` runs as `GITHUB_TOKEN` and fails unless Settings → Actions → General → "Allow GitHub Actions to create and approve pull requests" stays enabled. With `MIRROR_PAT`, the token's owner is the PR author and can't approve their own PRs, so if reviews are ever required, someone else has to approve.
+
+### Doing it manually
+
+If you ever need to do this by hand: create a `feature/{{ version }}` branch, update the URLs and hashes for each framework, create a `pre-{{ version }}` release on that branch with the framework zips attached (not marked latest), and open a PR. Once the PR is merged, create a `{{ version }}` release marked as latest.
+
+A backport (a version older than the latest release) must not go through `main`, or `main` ends up on older binaries. Build its `feature/{{ version }}` branch from the newest release tag on that line instead of `main`, attach the zips to `pre-{{ version }}` as usual, and create the `{{ version }}` release from that branch, not marked latest. Skip the PR.

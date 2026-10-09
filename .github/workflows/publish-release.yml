@@ -1,0 +1,44 @@
+name: publish-release
+
+# When a mirror PR is merged into main, publish the final `<version>` release
+# for every `pre-<version>` prerelease whose Package.swift has reached main and
+# that has no final release yet. Scanning all of them covers stacked PRs merged
+# out of order and runs GitHub cancelled while pending. Only the newest version
+# is marked latest, and only if it is newer than the current latest release.
+# Ordinary pushes to main (docs, CI tweaks, etc.) find nothing to publish. See
+# `publish_releases` in .github/scripts/mirror_upstream.py.
+#
+# Run it by hand (Actions -> publish-release -> Run workflow) to retry after a
+# failed publish. It only runs from main, since it publishes whatever reached
+# the checked-out history.
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: publish-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          # Full history and tags: the script walks Package.swift history to find
+          # the commit each pre-<version> landed in.
+          fetch-depth: 0
+
+      - name: Publish pending releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MIRROR_REPO: ${{ github.repository }}
+        run: python3 .github/scripts/mirror_upstream.py publish

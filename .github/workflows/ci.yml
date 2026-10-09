@@ -11,7 +11,8 @@ on:
 
 jobs:
   build:
-    runs-on: macos-latest
+    # temporarily pin macOS 27 until latest catches up with swift 6.4 required by package
+    runs-on: xcode-27
     environment: default
     steps:
       - uses: actions/checkout@v7

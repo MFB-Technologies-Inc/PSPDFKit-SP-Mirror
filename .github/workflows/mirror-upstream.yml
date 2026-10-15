@@ -27,6 +27,7 @@ concurrency:
 jobs:
   mirror:
     runs-on: ubuntu-latest
+    environment: mirror
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
